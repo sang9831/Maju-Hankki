@@ -12,7 +12,6 @@
 | 팀 구성 | 2인 (부트캠프 2차 프로젝트) |
 | 담당 역할 | 백엔드 개발 전반 |
 | 차별점 | 자유 텍스트 식사 성향을 임베딩으로 변환해 호환도까지 점수화 |
-| 대표 트러블슈팅 | 리프레시 토큰 쿠키 중복 발급 이슈 해결 |
 
 ![마주한끼 서비스 흐름](./docs/diagrams/overview.png)
 
@@ -20,12 +19,11 @@
 
 | 영역 | 작업 내용 |
 | --- | --- |
-| 인증/인가 | Spring Security + JWT 구조 설계·구현 |
+| 인증/인가 | 초기 Security/JWT 스캐폴딩 작성, 토큰 재발급(`/auth/token/refresh`) API 구현, 로그아웃 쿠키 버그 수정 |
 | 소셜 로그인 | Google OAuth2 연동 |
 | 실시간 채팅 | WebSocket/STOMP 기반 1:1 채팅 |
 | 지도 연동 | 선호 지역(시/군/구) 조회 API, 카카오맵 마커 UI 개선 |
 | 매칭 점수 | pgvector 단어 단위 임베딩 교차 비교로 호환도 산출 로직 리팩터링(1NF 데이터 모델, N×M 비교, myScore 분리) |
-| 트러블슈팅 | 리프레시 토큰 쿠키 중복 발급 이슈 해결 |
 
 ## 기술 스택
 
@@ -47,16 +45,23 @@
 
 ## 핵심 구현 내용
 
-### 1. Spring Security + JWT 인증 구조
+### 1. 인증 — 초기 스캐폴딩과 토큰 재발급 API
 
-| 구성요소 | 역할 |
+초기 Security/JWT 기본 골격(`JwtProvider`, `JwtFilter`, `SecurityConfig`, `AuthCookieUtil` 등)을
+처음 작성한 것은 본인이지만, 그 다음 날 팀원이 Google OAuth2와 Opaque Refresh Token
+Rotation(RTR) 구조로 크게 리팩터링했다. 즉 **현재 RTR 메커니즘 자체(토큰 해시 저장,
+재사용 탐지, 토큰 회전 로직)는 팀원이 설계·구현**한 것이고, 본인은 그 위에서 아래를
+작업했다.
+
+| 구성요소 | 작업 내용 |
 | --- | --- |
-| `JwtProvider` | 사용자 UUID·역할(UserRole)을 클레임에 담아 HS256 서명 Access Token 발급, issuer/audience 검증 |
-| `JwtFilter` | 매 요청 토큰 검증 후 SecurityContext에 인증 정보 세팅 |
-| `RefreshTokenRepository` + `RefreshTokenHasher` | Refresh Token을 해시로 DB 저장, `OpaqueTokenGenerator`로 발급해 Access Token과 분리 관리 |
-| RTR(Refresh Token Rotation) | 재발급마다 토큰 교체, 재사용 감지(`RefreshTokenReuseDetectedException`) 시 세션 계열 전체 폐기 |
-| `DelegatingPasswordEncoder` | bcrypt/argon2 선택적 적용 |
-| CSRF | `CookieCsrfTokenRepository` + `SpaCsrfTokenRequestHandler`로 SPA에 맞게 처리 |
+| `AuthController` (`/auth/token/refresh`) | 쿠키에서 Refresh Token을 추출해 팀원이 만든 `RefreshTokenService.rotate()`를 호출하고, 새 Access/Refresh Token 쿠키를 내려주는 재발급 엔드포인트 구현 |
+| 로그아웃 쿠키 버그 수정 | 로그아웃해도 쿠키에서 토큰이 안 사라지던 문제 수정 |
+| `PasswordEncoder` | bcrypt/argon2를 선택적으로 적용하는 인코딩 맵 구성(`DelegatingPasswordEncoder`) |
+
+> RTR 토큰 해시 저장(`RefreshTokenHasher`), Opaque 토큰 발급(`OpaqueTokenGenerator`),
+> 재사용 탐지(`RefreshTokenReuseDetectedException`), CSRF 설정은 팀원 작업이라
+> 아래 "내가 직접 하지 않은 부분"에 별도로 정리했다.
 
 ### 2. Google OAuth2 소셜 로그인
 
@@ -117,16 +122,21 @@ private float[] embedding;
 | 0.20 ~ 0.50 | 30 ~ 70점 | 느슨하게 관련 |
 | 0.50 ~ 1.0 | 70 ~ 100점 | 의미적으로 가까운 단어 |
 
-## 트러블슈팅
+## 내가 직접 하지 않은 부분
 
-### 1. Refresh Token 쿠키 중복 발급 및 세션 꼬임
+같은 저장소 안에 있지만 본인 작업이 아닌 것들. 2인 팀이라 인증/매칭 도메인을 함께
+다뤘고, 아래는 팀원(한재훈)이 설계·구현한 영역이다.
 
-| 구분 | 내용 |
+| 영역 | 내용 |
 | --- | --- |
-| 증상 | 로그인/재발급 시 동일 이름(`refreshToken`) 쿠키가 2개 생성 → 요청마다 두 값이 함께 전송 → 토큰 회전(RTR) 중 어떤 쿠키가 유효한지 불명확해져 정상 세션이 강제 폐기되거나 401 반복 |
-| 원인 | 초기 쿠키 경로가 `Path=/auth`였다가 `Path=/`로 변경됨. 브라우저는 쿠키를 이름+경로 조합으로 식별해 새 쿠키가 기존 쿠키를 덮어쓰지 않고 공존 → `/auth` 하위 요청 시 두 경로 모두 매칭되어 쿠키 2개 동시 전송 |
-| 해결 1 | `AuthCookieUtil.deleteLegacyRefreshTokenCookie()` 추가 — 토큰 발급/재발급/로그아웃 시 `Path=/auth, Max-Age=0` 쿠키를 함께 내려 구버전 쿠키를 명시적으로 만료 |
-| 해결 2 | `AuthController`에서 요청에 담긴 모든 `refreshToken` 쿠키를 스트림으로 수집 후 `distinct()`로 중복 제거 → 레거시 DB 세션까지 안전하게 일괄 폐기 |
+| Refresh Token Rotation 메커니즘 | `RefreshTokenHasher`(해시 저장), `OpaqueTokenGenerator`, `RefreshTokenReuseDetectedException`(재사용 탐지), `RefreshTokenService` 전반 |
+| 리프레시 토큰 쿠키 중복 발급 버그 수정 | `AuthCookieUtil.deleteLegacyRefreshTokenCookie()`, `AuthController`의 중복 쿠키 `distinct()` 제거 로직 |
+| CSRF 설정 | `CookieCsrfTokenRepository`, `SpaCsrfTokenRequestHandler` |
+| JWT 서명 설계 | HS256 서명, issuer/audience 클레임 요구 방식 |
+| 실시간 매칭 동시성 제어 | Redis 분산 락(`SET NX`), DB 비관적 락(`PESSIMISTIC_WRITE`) |
+| 매칭 후보 탐색 | `BidirectionalCandidateSearchService`의 PostGIS 공간 쿼리 |
+| 카카오 좌표 재검증 | `KakaoRegionPinValidator` |
+| 모니터링·인프라 | Prometheus/Grafana 구성, Docker |
 
 ## 실행 방법
 
