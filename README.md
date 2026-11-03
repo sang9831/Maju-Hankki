@@ -12,7 +12,7 @@
 | 팀 구성 | 2인 (부트캠프 2차 프로젝트) |
 | 담당 역할 | 백엔드 개발 전반 |
 | 차별점 | 자유 텍스트 식사 성향을 임베딩으로 변환해 호환도까지 점수화 |
-| 대표 트러블슈팅 | 리프레시 토큰 쿠키 중복 발급, 실시간 매칭 동시성 붕괴 |
+| 대표 트러블슈팅 | 리프레시 토큰 쿠키 중복 발급 이슈 해결 |
 
 ```mermaid
 flowchart LR
@@ -32,10 +32,9 @@ flowchart LR
 | 인증/인가 | Spring Security + JWT 구조 설계·구현 |
 | 소셜 로그인 | Google OAuth2 연동 |
 | 실시간 채팅 | WebSocket/STOMP 기반 1:1 채팅 |
-| 지도 연동 | 카카오맵 선호 지역 등록/표시, 행정동 좌표 서버 재검증 |
-| 매칭 도메인 | Redis 대기열, PostGIS 거리 필터, 비관적 락 기반 동시성 제어 |
-| 매칭 점수 | pgvector 단어 단위 임베딩 교차 비교로 호환도 산출 로직 고도화 |
-| 트러블슈팅 | 리프레시 토큰 쿠키 중복 발급, 실시간 매칭 동시성 이슈 해결 |
+| 지도 연동 | 선호 지역(시/군/구) 조회 API, 카카오맵 마커 UI 개선 |
+| 매칭 점수 | pgvector 단어 단위 임베딩 교차 비교로 호환도 산출 로직 리팩터링(1NF 데이터 모델, N×M 비교, myScore 분리) |
+| 트러블슈팅 | 리프레시 토큰 쿠키 중복 발급 이슈 해결 |
 
 ## 기술 스택
 
@@ -48,12 +47,12 @@ flowchart LR
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)
 ![pgvector](https://img.shields.io/badge/pgvector-336791?style=for-the-badge&logo=postgresql&logoColor=white)
 ![PostGIS](https://img.shields.io/badge/PostGIS-008000?style=for-the-badge&logo=postgresql&logoColor=white)
-![Redis](https://img.shields.io/badge/Redis-DC382D?style=for-the-badge&logo=redis&logoColor=white)
 ![Kakao Maps](https://img.shields.io/badge/Kakao%20Maps%20API-FFCD00?style=for-the-badge&logo=kakao&logoColor=black)
 ![Google OAuth2](https://img.shields.io/badge/Google%20OAuth2-4285F4?style=for-the-badge&logo=google&logoColor=white)
-![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?style=for-the-badge&logo=prometheus&logoColor=white)
-![Grafana](https://img.shields.io/badge/Grafana-F46800?style=for-the-badge&logo=grafana&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+
+> Redis 기반 실시간 매칭 대기열, Prometheus/Grafana 모니터링, Docker 인프라는 팀원이
+> 구축한 영역이라 이 README의 "기술 스택"에서는 본인이 직접 다룬 것만 남겼다
+> (PostGIS는 `Region` 엔티티의 좌표 컬럼에 한해 직접 사용했다).
 
 ## 핵심 구현 내용
 
@@ -87,13 +86,15 @@ flowchart LR
 | 악용 방지 | 메시지 크기 16KB 제한, 전송 버퍼/타임아웃 제한, `ChatMessageRateLimiter`로 전송 속도 제한 |
 | 영속화 | `ChatMessage`, `ChatRoom` 엔티티 |
 
-### 4. 카카오맵 기반 선호 지역 등록/표시
+### 4. 선호 지역 조회 API + 카카오맵 마커 UI
 
 | 구성요소 | 역할 |
 | --- | --- |
-| 프론트엔드 (`match-map.js`) | 카카오맵으로 선호 지역 지도 표시/선택 |
-| `KakaoRegionPinValidator` | 카카오 로컬 API(`/v2/local/geo/coord2regioncode.json`)로 좌표가 실제 행정동(H)/법정동(B) 코드 안에 있는지 서버 측 재검증 |
-| 장애 대응 | API 키 미설정·호출 실패 시 `UNAVAILABLE`로 분류해 품질 저하 없이 우회 |
+| `RegionController` / `RegionRepository` | 지원하는 구 단위 행정구역 목록과 지도 대표 좌표(위도/경도)를 조회하는 API 제공 |
+| 프론트엔드 (`match-map.js`) | 선호 지역을 시/군/구 select 방식으로 등록하도록 UX 개편, 카카오맵 마커를 화면 가운데 고정하는 형식으로 수정 |
+
+> 좌표가 실제 행정동/법정동 코드 안에 있는지 서버에서 재검증하는 `KakaoRegionPinValidator`는
+> 같은 팀 백엔드 파트인 region 검증 로직으로, 본인이 작성한 코드는 아니라 이 README에서는 제외했다.
 
 ### 5. pgvector 임베딩 기반 매칭 호환도 점수 계산
 
@@ -118,7 +119,7 @@ flowchart TD
 | 0점 처리 | 일치 태그 0개일 때 과거 50점(중립) 기본값을 버리고 0점으로 명확히 계산, 애매한 고점수 방지 |
 | 최종 점수 | 고정 태그(80%) + 임베딩 유사도(20%) 가중 평균, 한쪽 신호만 있어도 있는 신호로 산출 |
 | 양방향 점수 | `myScore` — 두 사용자 점수 중 낮은 쪽(pairScore) 대표값 방식을 버리고, 내가 상대를 원하는 정도/상대가 나를 원하는 정도를 각각 독립 계산 |
-| 사전 필터 | `BidirectionalCandidateSearchService`가 PostGIS 공간 쿼리로 반경·시간차 30분 이내 후보를 1차로 좁힌 뒤에만 호환도 계산 수행 |
+| 사전 필터 | PostGIS 공간 쿼리로 반경·시간차 30분 이내 후보를 1차로 좁힌 뒤에만 호환도 계산을 수행하도록 연동 (후보 탐색 자체는 팀원이 구현한 `BidirectionalCandidateSearchService`) |
 
 ```java
 @JdbcTypeCode(SqlTypes.VECTOR)
@@ -144,34 +145,6 @@ private float[] embedding;
 | 원인 | 초기 쿠키 경로가 `Path=/auth`였다가 `Path=/`로 변경됨. 브라우저는 쿠키를 이름+경로 조합으로 식별해 새 쿠키가 기존 쿠키를 덮어쓰지 않고 공존 → `/auth` 하위 요청 시 두 경로 모두 매칭되어 쿠키 2개 동시 전송 |
 | 해결 1 | `AuthCookieUtil.deleteLegacyRefreshTokenCookie()` 추가 — 토큰 발급/재발급/로그아웃 시 `Path=/auth, Max-Age=0` 쿠키를 함께 내려 구버전 쿠키를 명시적으로 만료 |
 | 해결 2 | `AuthController`에서 요청에 담긴 모든 `refreshToken` 쿠키를 스트림으로 수집 후 `distinct()`로 중복 제거 → 레거시 DB 세션까지 안전하게 일괄 폐기 |
-
-### 2. 실시간 매칭 중복 요청 및 동시성 이슈
-
-| 구분 | 내용 |
-| --- | --- |
-| 증상 | 매칭 요청 버튼 연타·다중 탭/디바이스 동시 요청 시 중복 대기 요청 생성, 심하면 한 사용자가 동시에 2개 이상의 `MATCHED` 매칭/채팅방에 매핑되는 데이터 정합성 붕괴 |
-| 원인 1 | 기존 검사 로직이 `WAITING` 상태 요청 존재 여부를 단순 SELECT로만 확인 → 두 요청이 거의 동시에 들어오면 둘 다 "기존 요청 없음"으로 판정되어 중복 저장 |
-| 원인 2 | Redis 기반 지리 대기열 탐색과 PostgreSQL 제안/매칭 저장 사이의 비동기 시차 → 두 후보가 동일 유저를 동시에 상호 수락하면 원자적 잠금 없이 Match/ChatRoom 중복 생성 가능 |
-
-해결:
-
-```mermaid
-flowchart LR
-    A[매칭 요청 진입] --> B{Redis SET NX, TTL 5분}
-    B -- 실패 이미 점유 --> C[409 Conflict MATCHING_003]
-    B -- 성공 --> D[요청 ID 오름차순 PESSIMISTIC_WRITE 락 획득]
-    D --> E{활성 MATCHED 매칭 존재?}
-    E -- 존재 --> F[409 Conflict MATCHING_014]
-    E -- 없음 --> G[매칭 확정 및 채팅방 생성]
-```
-
-- Redis 분산 락: 매칭 요청/제안 수락 진입 시 match:user:{userId} 키를 SET NX(TTL 5분)로 원자적 예약해 동일 사용자의 중복 진입을 차단.
-- DB 비관적 락: 상호 수락 확정 트랜잭션에서 두 MatchRequest의 ID를 오름차순으로 정렬해 PESSIMISTIC_WRITE 락을 걸어, 교착 상태 없이 경쟁 상황에서 한쪽만 성공하도록 처리.
-- 사용자당 활성 매칭 1개 정책: 새 요청 생성 전 Match.status = MATCHED인 활성 매칭 존재 여부를 선조회해 중복 매칭 자체를 서비스/DB 레벨에서 차단.
-
-## 모니터링
-
-monitoring/ 아래 Prometheus + Grafana 구성이 포함되어 있고, 대시보드(project2-overview.json)에는 HTTP 요청량/응답시간, JVM 메모리, HikariCP 커넥션 수, CPU 사용률 외에 매칭 후보 제안 처리량, 매칭 처리 시간(p95), 선택 기간 최종 매칭 완료 수 등 매칭 도메인 전용 지표 패널을 포함해 서비스 핵심 지표를 직접 추적할 수 있도록 구성했습니다.
 
 ## 실행 방법
 
